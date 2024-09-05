@@ -19,18 +19,22 @@ package netpol
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
+	"time"
+
+	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 	v1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	netutils "k8s.io/utils/net"
-	"net"
-	"strconv"
-	"strings"
-	"time"
 )
 
 // defaultPollIntervalSeconds [seconds] is the default value for which the Prober will wait before attempting next attempt.
@@ -66,6 +70,80 @@ type kubeManager struct {
 	dnsDomain      string
 }
 
+type networkAttachmentConfigParams struct {
+	cidr               string
+	excludeCIDRs       []string
+	namespace          string
+	name               string
+	topology           string
+	networkName        string
+	vlanID             int
+	allowPersistentIPs bool
+	role               string
+}
+
+type networkAttachmentConfig struct {
+	networkAttachmentConfigParams
+}
+
+func newNetworkAttachmentConfig(params networkAttachmentConfigParams) networkAttachmentConfig {
+	networkAttachmentConfig := networkAttachmentConfig{
+		networkAttachmentConfigParams: params,
+	}
+	if networkAttachmentConfig.networkName == "" {
+		networkAttachmentConfig.networkName = uniqueNadName(networkAttachmentConfig.name)
+	}
+	return networkAttachmentConfig
+}
+
+func uniqueNadName(originalNetName string) string {
+	const randomStringLength = 5
+	return fmt.Sprintf("%s_%s", rand.String(randomStringLength), originalNetName)
+}
+
+func generateNAD(config networkAttachmentConfig) *nadapi.NetworkAttachmentDefinition {
+	nadSpec := fmt.Sprintf(
+		`
+{
+        "cniVersion": "0.3.0",
+        "name": %q,
+        "type": "ovn-k8s-cni-overlay",
+        "topology":%q,
+        "subnets": %q,
+        "excludeSubnets": %q,
+        "mtu": 1300,
+        "netAttachDefName": %q,
+        "vlanID": %d,
+        "allowPersistentIPs": %t,
+        "role": %q
+}
+`,
+		config.networkName,
+		config.topology,
+		config.cidr,
+		strings.Join(config.excludeCIDRs, ","),
+		namespacedName(config.namespace, config.name),
+		config.vlanID,
+		config.allowPersistentIPs,
+		config.role,
+	)
+	return generateNetAttachDef(config.namespace, config.name, nadSpec)
+}
+
+func generateNetAttachDef(namespace, nadName, nadSpec string) *nadapi.NetworkAttachmentDefinition {
+	return &nadapi.NetworkAttachmentDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nadName,
+			Namespace: namespace,
+		},
+		Spec: nadapi.NetworkAttachmentDefinitionSpec{Config: nadSpec},
+	}
+}
+
+func namespacedName(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
+}
+
 // newKubeManager is a utility function that wraps creation of the kubeManager instance.
 func newKubeManager(framework *framework.Framework, dnsDomain string) *kubeManager {
 	return &kubeManager{
@@ -86,6 +164,27 @@ func (k *kubeManager) initializeClusterFromModel(ctx context.Context, model *Mod
 		}
 		namespaceName := namespace.Name
 		k.namespaceNames = append(k.namespaceNames, namespaceName)
+		// Make primary network for namespace pods to be managed by user defined network.
+		nad := networkAttachmentConfigParams{
+			topology:    "layer3",
+			cidr:        "10.128.0.0/16",
+			networkName: "sharednet",
+			role:        "primary",
+		}
+		netConfig := newNetworkAttachmentConfig(nad)
+		netConfig.namespace = namespaceName
+		netConfig.name = "sharednet"
+
+		nadClient, err := nadclient.NewForConfig(k.framework.ClientConfig())
+		if err != nil {
+			return err
+		}
+		nadConfig := generateNAD(netConfig)
+		framework.Logf("creating nad config %v for namespace %s", *nadConfig, namespaceName)
+		_, err = nadClient.NetworkAttachmentDefinitions(namespaceName).Create(context.Background(), nadConfig, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
 
 		for _, pod := range ns.Pods {
 			framework.Logf("creating pod %s/%s with matching service", namespaceName, pod.Name)
