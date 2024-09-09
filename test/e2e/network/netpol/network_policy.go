@@ -19,6 +19,7 @@ package netpol
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -27,7 +28,9 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 
 	"github.com/onsi/ginkgo/v2"
+	m "github.com/onsi/gomega"
 
+	ovnutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -999,11 +1002,13 @@ var _ = common.SIGDescribe("Netpol", func() {
 			framework.ExpectNoError(err, "Failing to list pods in namespace y")
 			pod := podList.Items[0]
 
+			podIPs := getAnnotatedPodIPs(&pod, fmt.Sprintf("%s/%s", nsY, "sharednet"))
+			m.Expect(len(podIPs)).To(m.Equal(1))
 			hostMask := 32
-			if utilnet.IsIPv6String(pod.Status.PodIP) {
+			if utilnet.IsIPv6String(podIPs[0].String()) {
 				hostMask = 128
 			}
-			podServerCIDR := fmt.Sprintf("%s/%d", pod.Status.PodIP, hostMask)
+			podServerCIDR := fmt.Sprintf("%s/%d", podIPs[0].String(), hostMask)
 			egressRule1 := networkingv1.NetworkPolicyEgressRule{}
 			egressRule1.To = append(egressRule1.To, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: podServerCIDR}})
 			policyAllowCIDR := GenNetworkPolicyWithNameAndPodMatchLabel("allow-client-a-via-cidr-egress-rule",
@@ -1026,17 +1031,21 @@ var _ = common.SIGDescribe("Netpol", func() {
 			framework.ExpectNoError(err, "Failing to find pod x/a")
 			podA := podList.Items[0]
 
-			podServerAllowCIDR := fmt.Sprintf("%s/4", podA.Status.PodIP)
+			podIPs := getAnnotatedPodIPs(&podA, fmt.Sprintf("%s/%s", nsX, "sharednet"))
+			m.Expect(len(podIPs)).To(m.Equal(1))
+			podServerAllowCIDR := fmt.Sprintf("%s/4", podIPs[0].String())
 
 			podList, err = f.ClientSet.CoreV1().Pods(nsX).List(ctx, metav1.ListOptions{LabelSelector: "pod=b"})
 			framework.ExpectNoError(err, "Failing to find pod x/b")
 			podB := podList.Items[0]
+			podIPs = getAnnotatedPodIPs(&podB, fmt.Sprintf("%s/%s", nsX, "sharednet"))
+			m.Expect(len(podIPs)).To(m.Equal(1))
 
 			hostMask := 32
-			if utilnet.IsIPv6String(podB.Status.PodIP) {
+			if utilnet.IsIPv6String(podIPs[0].String()) {
 				hostMask = 128
 			}
-			podServerExceptList := []string{fmt.Sprintf("%s/%d", podB.Status.PodIP, hostMask)}
+			podServerExceptList := []string{fmt.Sprintf("%s/%d", podIPs[0].String(), hostMask)}
 
 			egressRule1 := networkingv1.NetworkPolicyEgressRule{}
 			egressRule1.To = append(egressRule1.To, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: podServerAllowCIDR, Except: podServerExceptList}})
@@ -1059,19 +1068,23 @@ var _ = common.SIGDescribe("Netpol", func() {
 			podList, err := f.ClientSet.CoreV1().Pods(nsX).List(ctx, metav1.ListOptions{LabelSelector: "pod=a"})
 			framework.ExpectNoError(err, "Failing to find pod x/a")
 			podA := podList.Items[0]
+			podAIPs := getAnnotatedPodIPs(&podA, fmt.Sprintf("%s/%s", nsX, "sharednet"))
+			m.Expect(len(podAIPs)).To(m.Equal(1))
 
 			podList, err = f.ClientSet.CoreV1().Pods(nsX).List(ctx, metav1.ListOptions{LabelSelector: "pod=b"})
 			framework.ExpectNoError(err, "Failing to find pod x/b")
 			podB := podList.Items[0]
+			podBIPs := getAnnotatedPodIPs(&podB, fmt.Sprintf("%s/%s", nsX, "sharednet"))
+			m.Expect(len(podBIPs)).To(m.Equal(1))
 
 			// Exclude podServer's IP with an Except clause
 			hostMask := 32
-			if utilnet.IsIPv6String(podB.Status.PodIP) {
+			if utilnet.IsIPv6String(podBIPs[0].String()) {
 				hostMask = 128
 			}
 
-			podServerAllowCIDR := fmt.Sprintf("%s/4", podA.Status.PodIP)
-			podServerExceptList := []string{fmt.Sprintf("%s/%d", podB.Status.PodIP, hostMask)}
+			podServerAllowCIDR := fmt.Sprintf("%s/4", podAIPs[0].String())
+			podServerExceptList := []string{fmt.Sprintf("%s/%d", podBIPs[0].String(), hostMask)}
 			egressRule1 := networkingv1.NetworkPolicyEgressRule{}
 			egressRule1.To = append(egressRule1.To, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: podServerAllowCIDR, Except: podServerExceptList}})
 			policyAllowCIDR := GenNetworkPolicyWithNameAndPodMatchLabel("allow-client-a-via-cidr-egress-rule",
@@ -1083,7 +1096,7 @@ var _ = common.SIGDescribe("Netpol", func() {
 
 			ValidateOrFail(k8s, &TestCase{ToPort: 80, Protocol: v1.ProtocolTCP, Reachability: reachability})
 
-			podBIP := fmt.Sprintf("%s/%d", podB.Status.PodIP, hostMask)
+			podBIP := fmt.Sprintf("%s/%d", podBIPs[0].String(), hostMask)
 			//// Create NetworkPolicy which allows access to the podServer using podServer's IP in allow CIDR.
 			egressRule3 := networkingv1.NetworkPolicyEgressRule{}
 			egressRule3.To = append(egressRule3.To, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: podBIP}})
@@ -1464,4 +1477,16 @@ func initializeResources(ctx context.Context, f *framework.Framework, protocols 
 	k8s, err := initializeCluster(ctx, f, protocols, ports)
 	framework.ExpectNoError(err, "unable to initialize resources")
 	return k8s
+}
+
+func getAnnotatedPodIPs(pod *v1.Pod, nadName string) []net.IP {
+	var ips []net.IP
+	annotation, _ := ovnutil.UnmarshalPodAnnotation(pod.Annotations, nadName)
+	if annotation != nil {
+		// Use the OVN annotation if valid
+		for _, ip := range annotation.IPs {
+			ips = append(ips, ip.IP)
+		}
+	}
+	return ips
 }
