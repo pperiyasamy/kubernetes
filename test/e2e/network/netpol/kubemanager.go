@@ -164,9 +164,10 @@ func (k *kubeManager) initializeClusterFromModel(ctx context.Context, model *Mod
 		}
 		namespaceName := namespace.Name
 		k.namespaceNames = append(k.namespaceNames, namespaceName)
+		framework.Logf("chosen network topology: %s", framework.TestContext.NetworkTopology)
 		// Make primary network for namespace pods to be managed by user defined network.
 		nad := networkAttachmentConfigParams{
-			topology:    "layer3",
+			topology:    framework.TestContext.NetworkTopology,
 			cidr:        "10.128.0.0/16",
 			networkName: "sharednet",
 			role:        "primary",

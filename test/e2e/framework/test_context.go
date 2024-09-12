@@ -227,6 +227,9 @@ type TestContextType struct {
 
 	// Enable volume drivers which are disabled by default. See test/e2e/storage/in_tree_volumes.go for details.
 	EnabledVolumeDrivers []string
+
+	// Network topology for user defined networks (layer3 or layer2)
+	NetworkTopology string
 }
 
 // NodeKillerConfig describes configuration of NodeKiller -- a utility to

@@ -80,6 +80,7 @@ func handleFlags() {
 	config.CopyFlags(config.Flags, flag.CommandLine)
 	framework.RegisterCommonFlags(flag.CommandLine)
 	framework.RegisterClusterFlags(flag.CommandLine)
+	flag.StringVar(&framework.TestContext.NetworkTopology, "topology", "layer3", "the network topology of user defined networks")
 	flag.Parse()
 }
 
