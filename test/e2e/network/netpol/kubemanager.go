@@ -43,6 +43,9 @@ const defaultPollIntervalSeconds = 1
 // defaultPollTimeoutSeconds [seconds] is the default timeout when polling on probes.
 const defaultPollTimeoutSeconds = 10
 
+// randomStringLength length to be used for randomizing a string.
+const randomStringLength = 5
+
 // TestPod represents an actual running pod. For each Pod defined by the model,
 // there will be a corresponding TestPod. TestPod includes some runtime info
 // (namespace name, service IP) which is not available in the model.
@@ -154,13 +157,15 @@ func newKubeManager(framework *framework.Framework, dnsDomain string) *kubeManag
 }
 
 // initializeCluster initialized the cluster, creating namespaces pods and services as needed.
-func (k *kubeManager) initializeClusterFromModel(ctx context.Context, model *Model) error {
+func (k *kubeManager) initializeClusterFromModel(ctx context.Context, model *Model) (string, error) {
 	var createdPods []*v1.Pod
+	// Use random suffix for networkName adnd netConf name to avoid race between tests.
+	netName := fmt.Sprintf("sharednet-%s", rand.String(randomStringLength))
 	for _, ns := range model.Namespaces {
 		// no labels needed, we just need the default kubernetes.io/metadata.name label
 		namespace, err := k.framework.CreateNamespace(ctx, ns.BaseName, nil)
 		if err != nil {
-			return err
+			return "", err
 		}
 		namespaceName := namespace.Name
 		k.namespaceNames = append(k.namespaceNames, namespaceName)
@@ -169,22 +174,22 @@ func (k *kubeManager) initializeClusterFromModel(ctx context.Context, model *Mod
 		nad := networkAttachmentConfigParams{
 			topology:    framework.TestContext.NetworkTopology,
 			cidr:        "10.128.0.0/16",
-			networkName: "sharednet",
+			networkName: netName,
 			role:        "primary",
 		}
 		netConfig := newNetworkAttachmentConfig(nad)
 		netConfig.namespace = namespaceName
-		netConfig.name = "sharednet"
+		netConfig.name = netName
 
 		nadClient, err := nadclient.NewForConfig(k.framework.ClientConfig())
 		if err != nil {
-			return err
+			return "", err
 		}
 		nadConfig := generateNAD(netConfig)
 		framework.Logf("creating nad config %v for namespace %s", *nadConfig, namespaceName)
 		_, err = nadClient.NetworkAttachmentDefinitions(namespaceName).Create(context.Background(), nadConfig, metav1.CreateOptions{})
 		if err != nil {
-			return err
+			return "", err
 		}
 
 		for _, pod := range ns.Pods {
@@ -194,16 +199,16 @@ func (k *kubeManager) initializeClusterFromModel(ctx context.Context, model *Mod
 			// which is aware of linux vs windows pods
 			kubePod, err := k.createPod(ctx, pod.KubePod(namespaceName))
 			if err != nil {
-				return err
+				return "", err
 			}
 
 			createdPods = append(createdPods, kubePod)
 			svc, err := k.createService(ctx, pod.Service(namespaceName))
 			if err != nil {
-				return err
+				return "", err
 			}
 			if netutils.ParseIPSloppy(svc.Spec.ClusterIP) == nil {
-				return fmt.Errorf("empty IP address found for service %s/%s", svc.Namespace, svc.Name)
+				return "", fmt.Errorf("empty IP address found for service %s/%s", svc.Namespace, svc.Name)
 			}
 
 			k.allPods = append(k.allPods, TestPod{
@@ -219,11 +224,11 @@ func (k *kubeManager) initializeClusterFromModel(ctx context.Context, model *Mod
 	for _, createdPod := range createdPods {
 		err := e2epod.WaitForPodRunningInNamespace(ctx, k.clientSet, createdPod)
 		if err != nil {
-			return fmt.Errorf("unable to wait for pod %s/%s: %w", createdPod.Namespace, createdPod.Name, err)
+			return "", fmt.Errorf("unable to wait for pod %s/%s: %w", createdPod.Namespace, createdPod.Name, err)
 		}
 	}
 
-	return nil
+	return netName, nil
 }
 
 func (k *kubeManager) AllPods() []TestPod {
